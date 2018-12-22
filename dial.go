@@ -11,6 +11,9 @@ import (
 
 var errTimeout = error(&timeoutError{})
 
+// DialFn is the type of Dial functions
+type DialFn func(network, address string) (net.Conn, error)
+
 // A Dialer contains options for connecting to an address.
 type Dialer struct {
 	// Timeout is the maximum amount of time a dial will wait for
@@ -63,6 +66,12 @@ type Dialer struct {
 	//
 	// Only functional for go1.3+.
 	KeepAlive time.Duration
+
+	// ResolvedDialFn is an optional Dial function to be used
+	// for dialing a resolved address.
+	//
+	// If nil, net.Dialer.Dial will be used.
+	ResolvedDialFn DialFn
 }
 
 // Return either now+Timeout or Deadline, whichever comes first.
@@ -116,11 +125,15 @@ func (d *Dialer) Dial(network, address string) (net.Conn, error) {
 	if err != nil {
 		return nil, &net.OpError{Op: "dial", Net: network, Addr: nil, Err: err}
 	}
-	dialer := d.netDialer(deadline)
-	if addrs.Len() == 1 || len(network) < 3 || network[:3] != "tcp" {
-		return dialer.Dial(network, addrs.Addr(0))
+	dialFn := d.ResolvedDialFn
+	if dialFn == nil {
+		dialer := d.netDialer(deadline)
+		dialFn = dialer.Dial
 	}
-	return dialMulti(dialer, network, addrs)
+	if addrs.Len() == 1 || len(network) < 3 || network[:3] != "tcp" {
+		return dialFn(network, addrs.Addr(0))
+	}
+	return dialMulti(dialFn, network, addrs)
 }
 
 func resolveAddrsDeadline(resolver Resolver, filter ipFilter, network, address string, deadline time.Time) (addrList, error) {
@@ -155,7 +168,7 @@ func resolveAddrsDeadline(resolver Resolver, filter ipFilter, network, address s
 // the list of addresses. It will return the first established
 // connection and close the other connections. Otherwise it returns
 // error on the last attempt.
-func dialMulti(dialer net.Dialer, network string, addrs addrList) (net.Conn, error) {
+func dialMulti(dialFn DialFn, network string, addrs addrList) (net.Conn, error) {
 	type racer struct {
 		net.Conn
 		error
@@ -168,7 +181,7 @@ func dialMulti(dialer net.Dialer, network string, addrs addrList) (net.Conn, err
 	lane := make(chan racer, 1)
 	for i := 0; i < addrsLen; i++ {
 		go func(i int) {
-			c, err := dialer.Dial(network, addrs.Addr(i))
+			c, err := dialFn(network, addrs.Addr(i))
 			if _, ok := <-sig; ok {
 				lane <- racer{c, err}
 			} else if err == nil {
